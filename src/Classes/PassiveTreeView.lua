@@ -1133,8 +1133,8 @@ function PassiveTreeViewClass:Draw(build, viewPort, inputEvents)
 				local size = 130 * scale / self.zoom ^ 0.2
 				DrawImage(self.highlightRing, scrX - size, scrY - size, size * 2, size * 2)
 			else
-				-- Other top nodes: dim desaturated gray-blue
-				SetDrawColor(0.4, 0.42, 0.48, 0.55)
+				-- Other top nodes: saturated blue
+				SetDrawColor(0.2, 0.45, 0.9, 0.75)
 				local size = 110 * scale / self.zoom ^ 0.2
 				DrawImage(self.highlightRing, scrX - size, scrY - size, size * 2, size * 2)
 			end

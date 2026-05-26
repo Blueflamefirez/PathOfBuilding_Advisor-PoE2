@@ -1,5 +1,10 @@
 # Path of Building Community Fork Codebase Rundown
 
+> **Note:** This file documents the upstream PoB2 Community codebase.
+> For the Advisor fork additions (AdvisorTab, Build.lua patches, ring highlights), see [AdvisorTab Architecture](#advisortab-architecture-fork-addition) at the bottom.
+
+
+
 ## Layout
 * ### Assets
     * **game_ui_small.png**
@@ -166,3 +171,84 @@
     Consumes and applies table of update instructions. Updating the runtime itself is done from a separate host environment.
 * **UpdateCheck.lua**
     Compares local and remote manifests to determine which files need to be updated, downloads these files and `changelog.txt`, rebuilds `manifest.xml` and builds table of update instructions.
+
+---
+
+## AdvisorTab Architecture (fork addition)
+
+Branch: `feature/advisor-tab`. Three files were added or patched.
+
+### New file: `src/Classes/AdvisorTab.lua`
+
+Not in `manifest.xml` (intentional — fork-only file). Implements the **Advisor** tab visible in the top toolbar (button after Party, keyboard shortcut `8`).
+
+**Responsibilities:**
+1. **Passive node scoring** — BFS from allocated nodes, scoring reachable notables/keystones via real delta-calc calls
+2. **Stepping-stone chain display** — collapsible click-to-expand rows showing the path of attribute/socket nodes leading to each suggestion
+3. **Gem suggestions** — keyword-matching support gems against the main skill's damage-type flags
+
+**Key state:**
+| Field | Purpose |
+|-------|---------|
+| `self.nodeList` | Top-10 scored entries; each has `{node, path, score, offence, defence, chainLen, rank}` |
+| `self.expandedEntries` | `nodeId → bool`; tracks which suggestion rows are expanded by the user |
+| `self.clickableRows` | `{x,y,w,h,nodeId}` list rebuilt every frame for click hit-testing |
+
+**BFS scoring algorithm (`_rebuildNodes`):**
+1. Seed queue from every unallocated node adjacent to an allocated node
+2. BFS loop: stepping stones (`Socket` or `isAttribute`) extend the chain; scoreable nodes (has `modKey`, constraints met) are evaluated with `calcFunc({ addNodes = all_chain_nodes + target })`
+3. Score = `(offence + defence × 0.3) / chainLen` — normalised per point so long chains don't unfairly outrank direct notables
+4. Depth cap: 4 stepping stones max
+5. Top-10 sorted by normalised score; `advisorNodeIds` and `advisorViaIds` written to `build` for ring highlights
+
+**Click-to-expand UI (`_drawEntry`):**
+- Every suggestion renders a permanent base row: icon, `#N` rank, node name, type · invest · stat, DPS delta
+- Rows with stepping-stone chains additionally show a `[+N hops]` label and register a hit rectangle
+- Clicking anywhere in the row toggles `expandedEntries[nodeId]`, revealing/hiding stepping-stone sub-rows
+- Click processing order inside `Draw`: (1) scroll, (2) clear + rebuild hit areas, (3) draw, (4) check clicks — this ensures hit areas always match the current scroll position
+
+**PoB2 mouse input gotcha:**
+`event.x` / `event.y` are `nil` for `LEFTBUTTON` events. Always use `GetCursorPos()`:
+```lua
+local mx, my = GetCursorPos()
+if mx and my then ... end
+```
+
+---
+
+### Patched file: `src/Modules/Build.lua` (5 patches)
+
+| Patch | Location | What it does |
+|-------|----------|--------------|
+| Sidebar button | ~line 440, after `modeParty` control | Adds "Advisor" button, sets `viewMode = "ADVISOR"` |
+| Tab instantiation | ~line 612, after `self.compareTab` | `self.advisorTab = new("AdvisorTab", self)` |
+| Keyboard shortcut | After `elseif event.key == "7"` | `elseif event.key == "8" then self.viewMode = "ADVISOR"` |
+| Draw dispatch | After `elseif self.viewMode == "CALCS"` | `elseif self.viewMode == "ADVISOR" then self.advisorTab:Draw(...)` |
+| RebuildCache hook | After both `BuildOutput()` calls | `self.advisorTab:RebuildCache()` |
+
+---
+
+### Patched file: `src/Classes/PassiveTreeView.lua` (ring highlights)
+
+After the `searchStrResults` highlight block (~line 1127), before the hover tooltip block:
+
+```lua
+if build.advisorNodeIds and build.advisorNodeIds[nodeId] then
+    SetDrawLayer(nil, 29)
+    if build.advisorNodeIds[nodeId] == 1 then
+        SetDrawColor(0.3, 0.8, 1.0)           -- bright blue  = #1 best
+        local size = 130 * scale / self.zoom ^ 0.2
+    else
+        SetDrawColor(0.2, 0.45, 0.9, 0.75)    -- saturated blue = #2–10
+        local size = 110 * scale / self.zoom ^ 0.2
+    end
+    DrawImage(self.highlightRing, scrX - size, scrY - size, size * 2, size * 2)
+    SetDrawColor(1, 1, 1)
+elseif build.advisorViaIds and build.advisorViaIds[nodeId] then
+    SetDrawLayer(nil, 29)
+    SetDrawColor(0.85, 0.55, 0.15, 0.7)       -- amber = stepping stone
+    local size = 110 * scale / self.zoom ^ 0.2
+    DrawImage(self.highlightRing, scrX - size, scrY - size, size * 2, size * 2)
+    SetDrawColor(1, 1, 1)
+end
+```
