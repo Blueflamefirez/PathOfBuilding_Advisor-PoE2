@@ -1125,6 +1125,17 @@ function PassiveTreeViewClass:Draw(build, viewPort, inputEvents)
 			end
 
 		end
+		if build.advisorNodeIds and build.advisorNodeIds[nodeId] then
+			SetDrawLayer(nil, 29)
+			if build.advisorNodeIds[nodeId] == 1 then
+				SetDrawColor(0.3, 0.8, 1.0)
+			else
+				SetDrawColor(0.4, 0.65, 0.85)
+			end
+			local size = 130 * scale / self.zoom ^ 0.2
+			DrawImage(self.highlightRing, scrX - size, scrY - size, size * 2, size * 2)
+			SetDrawColor(1, 1, 1)
+		end
 		if node == hoverNode and (node.type ~= "Socket" or not IsKeyDown("SHIFT")) and not IsKeyDown("CTRL") and not main.popups[1] then
 			-- Draw tooltip
 			SetDrawLayer(nil, 100)
