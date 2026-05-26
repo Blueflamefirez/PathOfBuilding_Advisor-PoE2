@@ -1128,11 +1128,22 @@ function PassiveTreeViewClass:Draw(build, viewPort, inputEvents)
 		if build.advisorNodeIds and build.advisorNodeIds[nodeId] then
 			SetDrawLayer(nil, 29)
 			if build.advisorNodeIds[nodeId] == 1 then
+				-- Best node: bright light blue
 				SetDrawColor(0.3, 0.8, 1.0)
+				local size = 130 * scale / self.zoom ^ 0.2
+				DrawImage(self.highlightRing, scrX - size, scrY - size, size * 2, size * 2)
 			else
-				SetDrawColor(0.4, 0.65, 0.85)
+				-- Other top nodes: dim desaturated gray-blue
+				SetDrawColor(0.4, 0.42, 0.48, 0.55)
+				local size = 110 * scale / self.zoom ^ 0.2
+				DrawImage(self.highlightRing, scrX - size, scrY - size, size * 2, size * 2)
 			end
-			local size = 130 * scale / self.zoom ^ 0.2
+			SetDrawColor(1, 1, 1)
+		elseif build.advisorViaIds and build.advisorViaIds[nodeId] then
+			-- Stepping-stone node: must be allocated first to reach a top-ranked target
+			SetDrawLayer(nil, 29)
+			SetDrawColor(0.85, 0.55, 0.15, 0.7)
+			local size = 110 * scale / self.zoom ^ 0.2
 			DrawImage(self.highlightRing, scrX - size, scrY - size, size * 2, size * 2)
 			SetDrawColor(1, 1, 1)
 		end

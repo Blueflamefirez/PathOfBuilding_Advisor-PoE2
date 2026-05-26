@@ -26,53 +26,111 @@ function AdvisorTabClass:RebuildCache()
 	self:_rebuildSkills()
 end
 
--- Enumerate reachable unallocated nodes and score each by actual DPS delta.
--- Uses CalcsTab's fast node calculator, which already accounts for the current
--- skill setup, equipped items, and all other build state.
+-- Returns true if a node's unlock constraints are all satisfied.
+local function constraintsMet(node, specNodes)
+	if not node.unlockConstraint then return true end
+	for _, reqId in ipairs(node.unlockConstraint.nodes) do
+		local req = specNodes[reqId]
+		if req and not req.alloc then return false end
+	end
+	return true
+end
+
+-- Returns true if a node is a "stepping stone" — a jewel socket or attribute node
+-- that has no meaningful DPS mods itself but sits between allocated nodes and
+-- potentially strong targets.
+local function isSteppingStone(node)
+	return node.type == "Socket" or node.isAttribute == true
+end
+
+-- Score reachable nodes using getMiscCalculator + CalculateCombinedOffDefStat,
+-- identical to PoB's own heat map. Also looks one hop further when a 1-hop
+-- reachable node is a jewel socket or attribute node, evaluating the combined
+-- gain of (stepping stone + target) as a single 2-point investment.
 function AdvisorTabClass:_rebuildNodes()
-	local build = self.build
-	local nodeCalc, baseOutput = build.calcsTab:GetNodeCalculator()
-	if not nodeCalc or not baseOutput then
-		self.nodeList = {}
+	local build  = self.build
+	local spec   = build.spec
+	local calcFunc, calcBase = build.calcsTab:GetMiscCalculator()
+	if not calcFunc or not calcBase then
+		self.nodeList        = {}
 		build.advisorNodeIds = {}
+		build.advisorViaIds  = {}
 		return
 	end
 
-	local baseDPS  = baseOutput.TotalDPS or baseOutput.CombinedDPS or 0
-	local baseLife = baseOutput.Life or 0
+	local scored   = {}
+	local seen     = {}   -- nodeId → true once scored, avoids duplicates
+	local stones   = {}   -- stepping-stone node objects reachable in 1 hop
 
-	local scored = {}
-	for nodeId, node in pairs(build.spec.nodes) do
+	-- ── Pass 1: score all meaningful 1-hop reachable nodes ───────────────────
+	for nodeId, node in pairs(spec.nodes) do
 		if not node.alloc
 		   and not node.ascendancyName
 		   and node.type ~= "ClassStart"
 		   and node.type ~= "AscendClassStart"
-		   and node.type ~= "Socket"
 		   and node.type ~= "Mastery"
 		   and not node.isBlighted then
-			-- 1-hop reachability check
+
 			local reachable = false
-			for _, linkedId in ipairs(node.linked or {}) do
-				if build.spec.allocNodes[linkedId] then
-					reachable = true
-					break
+			for _, ln in ipairs(node.linked or {}) do
+				if ln.alloc then reachable = true; break end
+			end
+
+			if reachable and not constraintsMet(node, spec.nodes) then
+				reachable = false
+			end
+
+			if reachable then
+				if isSteppingStone(node) then
+					-- Collect for Pass 2 regardless of modKey
+					stones[nodeId] = node
+				end
+
+				-- Score if this node has actual mods (attribute nodes do, sockets don't)
+				if (node.modKey or "") ~= "" and not isSteppingStone(node) then
+					local ok, output = pcall(calcFunc, { addNodes = { [node] = true } })
+					if ok and output then
+						local off, def = build.calcsTab:CalculateCombinedOffDefStat(output, calcBase)
+						off = off or 0; def = def or 0
+						t_insert(scored, {
+							nodeId  = nodeId, node = node,
+							score   = off + def * 0.3,
+							offence = off, defence = def,
+							via     = nil,
+						})
+						seen[nodeId] = true
+					end
 				end
 			end
-			if reachable then
-				local ok, output = pcall(nodeCalc, {node})
+		end
+	end
+
+	-- ── Pass 2: 2-hop targets behind jewel sockets / attribute nodes ─────────
+	for _, stone in pairs(stones) do
+		for _, target in ipairs(stone.linked or {}) do
+			local tid = target.id
+			if tid and not target.alloc and not seen[tid]
+			   and not target.ascendancyName
+			   and target.type ~= "ClassStart"
+			   and target.type ~= "AscendClassStart"
+			   and target.type ~= "Socket"   -- don't chain through two sockets
+			   and target.type ~= "Mastery"
+			   and not target.isBlighted
+			   and (target.modKey or "") ~= ""
+			   and constraintsMet(target, spec.nodes) then
+
+				-- Evaluate combined gain of allocating stone + target together
+				local ok, output = pcall(calcFunc, { addNodes = { [stone] = true, [target] = true } })
 				if ok and output then
-					local dpsDelta  = (output.TotalDPS or output.CombinedDPS or 0) - baseDPS
-					local lifeDelta = (output.Life or 0) - baseLife
-					-- DPS is primary; life adds a small tiebreaker so pure-survivability
-					-- nodes still rank above zero-impact nodes.
-					local score = dpsDelta + lifeDelta * 0.001
+					local off, def = build.calcsTab:CalculateCombinedOffDefStat(output, calcBase)
+					off = off or 0; def = def or 0
 					t_insert(scored, {
-						nodeId    = nodeId,
-						node      = node,
-						score     = score,
-						dpsDelta  = dpsDelta,
-						lifeDelta = lifeDelta,
+						nodeId  = tid, node = target,
+						score   = off + def * 0.3,
+						offence = off, defence = def,
+						via     = stone,
 					})
+					seen[tid] = true
 				end
 			end
 		end
@@ -85,10 +143,16 @@ function AdvisorTabClass:_rebuildNodes()
 		self.nodeList[i] = scored[i]
 	end
 
-	-- Expose ranked node IDs to PassiveTreeView for light-blue highlight rings.
+	-- Expose node IDs to PassiveTreeView.
+	-- advisorNodeIds: rank 1–10 for the actual target nodes.
+	-- advisorViaIds:  stepping-stone nodes that must be taken first.
 	build.advisorNodeIds = {}
+	build.advisorViaIds  = {}
 	for i, entry in ipairs(self.nodeList) do
 		build.advisorNodeIds[entry.nodeId] = i
+		if entry.via and not build.advisorNodeIds[entry.via.id] then
+			build.advisorViaIds[entry.via.id] = true
+		end
 	end
 end
 
@@ -249,10 +313,14 @@ function AdvisorTabClass:Draw(viewPort, inputEvents)
 			else
 				SetDrawColor(1, 1, 1)
 			end
-			DrawString(lx + 28, rowY, "LEFT", 15, "VAR BOLD", node.name or "Unknown")
+			DrawString(lx + 28, rowY, "LEFT", 15, "VAR BOLD", node.dn or node.name or "Unknown")
 
-			-- Type label + first stat description
+			-- Type label + via label for 2-hop entries
 			local badge = node.isKeystone and "Keystone" or node.isNotable and "Notable" or "Node"
+			if entry.via then
+				local viaLabel = entry.via.type == "Socket" and "via Socket" or "via Attr"
+				badge = badge .. "  [" .. viaLabel .. "]"
+			end
 			SetDrawColor(0.45, 0.45, 0.5)
 			DrawString(lx + 28, rowY + 17, "LEFT", 11, "VAR", badge)
 
@@ -263,22 +331,24 @@ function AdvisorTabClass:Draw(viewPort, inputEvents)
 				DrawString(lx + 84, rowY + 17, "LEFT", 11, "VAR", sdText)
 			end
 
-			-- DPS delta (right-aligned)
-			if entry.dpsDelta >= 0.05 then
+			-- Offence score (right-aligned) — relative CombinedDPS gain
+			local offPct = entry.offence * 100
+			if offPct >= 0.05 then
 				SetDrawColor(0.3, 1.0, 0.4)
-				DrawString(lx + colW - 4, rowY, "RIGHT", 13, "VAR", s_format("+%.1f DPS", entry.dpsDelta))
-			elseif entry.dpsDelta <= -0.05 then
+				DrawString(lx + colW - 4, rowY, "RIGHT", 13, "VAR", s_format("+%.2f%% DPS", offPct))
+			elseif offPct <= -0.05 then
 				SetDrawColor(1.0, 0.4, 0.3)
-				DrawString(lx + colW - 4, rowY, "RIGHT", 13, "VAR", s_format("%.1f DPS", entry.dpsDelta))
+				DrawString(lx + colW - 4, rowY, "RIGHT", 13, "VAR", s_format("%.2f%% DPS", offPct))
 			else
 				SetDrawColor(0.5, 0.5, 0.5)
-				DrawString(lx + colW - 4, rowY, "RIGHT", 13, "VAR", "+0 DPS")
+				DrawString(lx + colW - 4, rowY, "RIGHT", 13, "VAR", "~0% DPS")
 			end
 
-			-- Life delta
-			if math.abs(entry.lifeDelta) >= 1 then
-				SetDrawColor(0.85, 0.4, 0.4)
-				DrawString(lx + colW - 4, rowY + 17, "RIGHT", 11, "VAR", s_format("%+.0f Life", entry.lifeDelta))
+			-- Defence score
+			local defPct = entry.defence * 100
+			if defPct >= 0.01 then
+				SetDrawColor(0.4, 0.7, 1.0)
+				DrawString(lx + colW - 4, rowY + 17, "RIGHT", 11, "VAR", s_format("+%.2f%% Def", defPct))
 			end
 
 			lY = lY + 42
